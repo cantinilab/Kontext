@@ -21,7 +21,7 @@ def format_key(k):
         #params
         'k_geom':'kg','scaled_gaussian':'rgb','param_lambda':'lam','n_comps':'nPC','n_components':'nPC',
         'spatial_n_neighbors':'snn','random_seed':'seed','partition_seed':'seed','sigma_e':'se','alpha':'a',
-        'n_top_genes':'g','spatial_coef':'sc','context_coef':'cc','expression_coef':'ec','phase':'p',
+        'n_top_genes':'g','spatial_coef':'sc',
         }
     if k in correspondances: 
         return(correspondances[k])
@@ -272,11 +272,11 @@ def _dists_dense(X, rows, cols, nnz, mem_budget_gb):
 
     return dists
 
-def add_diagonal(w, alpha):
-    """Add alpha · row_sums to the diagonal."""
+def add_diagonal(w, coef):
+    """Add coef · row_sums to the diagonal."""
     w = sps.csr_matrix(w)
     sums = np.asarray(w.sum(1)).ravel()
-    return w + sps.diags(alpha * sums)
+    return w + sps.diags(coef * sums)
 
 def row_normalize(w):
     """Row-normalize a sparse matrix."""
@@ -403,12 +403,12 @@ def safe_nz(matrix, axis):
     return counts
 
 
-def me_correlation(adata, layer_C="C"):
+def local_alignment(self,adata, layer_C="C"):
     """Per-cell context correlation (Pearson):.cosine similarity in PCA space."""
     Xz, Cz = zscore(to_dense(adata.X)), zscore(to_dense(adata.layers[layer_C]))
     num = (Xz * Cz).sum(1)
     den = np.sqrt((Xz**2).sum(1) * (Cz**2).sum(1)) + 1e-10
-    adata.obs["me_correlation"] = np.asarray((num / den).astype(np.float32)).ravel()
+    adata.obs["local_alignment"] = np.asarray((num / den).astype(np.float32)).ravel()
 
 
 
@@ -435,40 +435,6 @@ def get_joint_knn_graph(latents_1, k,knn_metric = 'manhattan', latents_2=None):
         indices = indices[:, 1:]
     return indices
 
-# def get_knn_purity(knn_indices, labels_x, labels_y, k):
-#     """
-#     Measure the proportion of k-nearest neighbors sharing the same class.
-#     """
-#     print('###')
-#     neighbor_labels = labels_y[knn_indices[:, :k]]
-#     same_class_match = (labels_x[:, np.newaxis] == neighbor_labels)
-#     return np.mean(same_class_match)
-
-
-# def get_purity_vector_per_cluster(mat, cell_type, cluster_labels, ks=[10, 20, 30, 50, 70, 100]):
-#     """
-#     KNN graph built on ALL cells; purity computed separately per cluster.
-#     """
-#     if not np.issubdtype(np.array(cell_type).dtype, np.integer):
-#         _, cell_type = np.unique(cell_type, return_inverse=True)
-#     cell_type = np.asarray(cell_type)
-#     cluster_labels = np.asarray(cluster_labels)
-
-#     k_max = max(ks)
-#     print(f'Building KNN graph with k_max={k_max}',end=' ')
-#     indices = get_joint_knn_graph(mat, k=k_max)
-#     print('done')
-#     cluster_purities = {}
-#     for cl in np.unique(cluster_labels):
-#         mask = cluster_labels == cl
-#         print(cl)
-#         cluster_purities[cl] = [
-#             get_knn_purity(indices[mask], cell_type[mask], cell_type, k=k)
-#             for k in ks
-#         ]
-#     return ks, cluster_purities
-
-
 
 def knn_indices(mat, k, metric="euclidean", approx=True):
     """Euclidean brute force uses BLAS (fast, multithreaded); pynndescent if available."""
@@ -485,10 +451,10 @@ def knn_indices(mat, k, metric="euclidean", approx=True):
                           metric=metric, n_jobs=-1).fit(mat)
     return nn.kneighbors(mat, return_distance=False)[:, 1:]
 
-def get_purity_vector_per_cluster(mat, cell_type, cluster_labels,
+def get_purity_vector_per_domain(mat, cell_type, domain_labels,
                                   ks=(10, 20, 30, 50, 70, 100), **kw):
     _, ct = np.unique(np.asarray(cell_type), return_inverse=True)
-    cl = np.asarray(cluster_labels)
+    cl = np.asarray(domain_labels)
     idx = knn_indices(mat, max(ks), **kw)
     match = (ct[idx] == ct[:, None])                       # (n, k_max), computed ONCE
     csum = np.cumsum(match, axis=1, dtype=np.int32)        # all ks in one pass
@@ -949,6 +915,18 @@ def one_hot_encoding_category(adata, column):
     return categories, Q
 
 
+def niche_enrichment(adata, group,categories_of_interest,
+                     key="niche_annotation", categories=None):
+    """Log2 enrichment of niche context in clusters vs global baseline."""
+    N = adata.obsm[key].toarray() if sps.issparse(adata.obsm[key]) else np.asarray(adata.obsm[key])
+    categories = categories or adata.uns[key]["categories"]
+    global_mean = N.mean(axis=0)  # expected
+    print(global_mean)
+    idx = np.where(adata.obs[group].isin(categories_of_interest))[0]
+    cluster_mean = N[idx].mean(axis=0)  # observed
+    print(cluster_mean)
+    enrichment = np.log2((cluster_mean + 1e-9) / (global_mean + 1e-9))
+    return pd.Series(enrichment, index=categories)
 
 
 
@@ -970,7 +948,8 @@ def lr_normalize(adata, pairs, target_sum=1e4, key='X_lr'):
     C = sps.csr_matrix(adata.layers['counts'], dtype=np.float32)
     C = sps.diags(target_sum / np.maximum(np.asarray(C.sum(1)).ravel(), 1)) @ C 
     adata.obsm[key] = C[:, adata.var_names.get_indexer(keep)].log1p().tocsr()
-    adata.uns['lr'] = {'genes': list(keep), 'pairs': pairs[pairs.ligand.isin(keep) & pairs.receptor.isin(keep)]}
+    if 'lr' not in adata.uns:
+        adata.uns['lr'] = {'genes': list(keep), 'pairs': pairs[pairs.ligand.isin(keep) & pairs.receptor.isin(keep)]}
 
 
 
@@ -984,16 +963,8 @@ def lr_availability(adata, sender=None, groups='main_cell_type', w_key='wc', key
     adata.obsm[f'A_{s}'] = (W @ adata.obsm[key].multiply(t[:, None])).tocsr()
     adata.obsm[f'P_{s}'] = (sps.diags(1 / np.maximum(m, 1e-12)) @ adata.obsm[f'A_{s}']).tocsr()
 
-# def lr_moments(adata, src, om=None, q=0.05):
-#     M = adata.obsm[src] if om is None else adata.obsm[src][om]
-#     mu = np.asarray(M.mean(0)).ravel().astype(np.float32)
-#     ex2 = np.asarray(M.multiply(M).mean(0)).ravel() if sps.issparse(M) else (_D(M)**2).mean(0)
-#     sd = np.sqrt(np.maximum(ex2 - mu**2, 0)).astype(np.float32)
-#     adata.uns['lr'][f'mom_{src}'] = {'mu': mu, 'sd': sd + 1e-9, 'den': mu + np.quantile(mu[mu > 0], q)}
-
 
 def lr_moments(adata, src, om=None, q=0.05,r=None):
-
     M = adata.obsm[src] if om is None else adata.obsm[src][om]
     if r is not None:
         M = M[(adata.obs[r['col']]==r['value']).values] if om is None else M[(adata[om].obs[r['col']]==r['value']).values]
@@ -1001,7 +972,7 @@ def lr_moments(adata, src, om=None, q=0.05,r=None):
     ex2 = np.asarray(M.multiply(M).mean(0)).ravel() if sps.issparse(M) else (_D(M)**2).mean(0)
     sd = np.sqrt(np.maximum(ex2 - mu**2, 0)).astype(np.float32)
     if r is not None:
-        adata.uns['lr'][f'mom_{src}_{r['col']}_{r['value']}'] = {'mu': mu, 'sd': sd + 1e-9, 'den': mu + np.quantile(mu[mu > 0], q)}
+        adata.uns['lr'][f"mom_{src}_{r['col']}_{r['value']}"] = {'mu': mu, 'sd': sd + 1e-9, 'den': mu + np.quantile(mu[mu > 0], q)}
     else:
         adata.uns['lr'][f'mom_{src}'] = {'mu': mu, 'sd': sd + 1e-9, 'den': mu + np.quantile(mu[mu > 0], q)}
 
@@ -1027,7 +998,7 @@ def _norm(adata, src, om, cols, mode,r=None):                     # slice column
     else:
         M = _D(adata.obsm[src][om][:, cols])
         M = M[(adata[om].obs[r['col']]==r['value']).values]
-        s = adata.uns['lr'][f'mom_{src}_{r['col']}_{r['value']}']
+        s = adata.uns['lr'][f"mom_{src}_{r['col']}_{r['value']}"]
 
     if mode == 'raw':
         return(M)
@@ -1080,3 +1051,5 @@ def lr_cell_score(adata, sender='all', receiver=None, groups='main_cell_type', m
         s = slice(k, k + chunk)
         v = v + (_norm(adata, 'X_lr', om, ri[s], mode,r=r) * _norm(adata, f'{src}_{sender}', om, li[s], mode, r=r)).sum(1)
     adata.obs[col or f'LR_{src}_{sender}_{mode}'] = pd.Series(v / len(names), index=adata.obs_names[om])
+
+

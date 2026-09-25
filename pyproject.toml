@@ -15,7 +15,7 @@ authors = [
 keywords = [
     "spatial-transcriptomics",
     "single-cell",
-    "context",
+    "spatial-domains",
     "ligand-receptor",
     "neighborhood",
     "clustering",

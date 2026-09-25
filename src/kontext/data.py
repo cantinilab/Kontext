@@ -67,7 +67,16 @@ def preprocess_adata(adata,preprocessing='jsPCA',
         adata = compute_hvg(adata,n_top_genes=2000,hvg_layer='count',target_sum=None)
         sc.pp.scale(adata)
 
-    if preprocessing == 'large2svg':
+    if preprocessing == 'sparse':
+        if verbose:
+            print('')
+        sc.pp.filter_genes(adata,min_cells=20)
+        sc.pp.normalize_total(adata, target_sum=1e4)   # L1 / library-size scaling
+        sc.pp.log1p(adata)                              # log1p on stored entries only
+        adata.X = normalize(adata.X, norm="l2", axis=1) # unit-L2 rows (sklearn, sparse-safe)
+
+
+    if preprocessing == 'sparse_hvg':
         if verbose:
             print('pp large2')
         sc.pp.filter_genes(adata,min_cells=20)
@@ -76,7 +85,7 @@ def preprocess_adata(adata,preprocessing='jsPCA',
         sc.pp.log1p(adata)                              # log1p on stored entries only
         adata.X = normalize(adata.X, norm="l2", axis=1) # unit-L2 rows (sklearn, sparse-safe)
 
-    if preprocessing == 'large2svg_LR':
+    if preprocessing == 'sparse_hvg_LR':
         from kontext.utils import get_LR_pairs
 
         print('pp large2hvg_LR')
@@ -93,7 +102,7 @@ def preprocess_adata(adata,preprocessing='jsPCA',
         sc.pp.log1p(adata)                                                        # 5. log1p
         adata.X = normalize(adata.X, norm="l2", axis=1)                           #    + L2
 
-    if preprocessing == 'xenium':
+    if preprocessing == 'image':
         if verbose:
             print('pp xenium')
         sc.pp.log1p(adata)                              # log1p on stored entries only

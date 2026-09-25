@@ -81,7 +81,7 @@ def umap_plot(adata,color=None,ax=None,s=20,umap_key='X_umap'):
 
 # Proportions 
 
-def get_proportions(adata,col1='clustering',col2='cell_type',normalize='index'):
+def get_proportions(adata,col1='spatial_domains',col2='cell_type',normalize='index'):
     return(pd.crosstab(
         adata.obs[col1], 
         adata.obs[col2], 
@@ -89,27 +89,30 @@ def get_proportions(adata,col1='clustering',col2='cell_type',normalize='index'):
         ))
     
 
-def plot_proportions(proportions:pd.DataFrame, ax=None, colors=None):
+def plot_proportions(proportions: pd.DataFrame, ax=None, colors=None, horizontal=True):
     """
     proportions: DataFrame (rows=clusters, columns=cell_types)
     colors: Dictionary mapping column names (cell_types) to hex colors
     """
     if ax is None:
-        # Assuming get_figs is defined in your environment
         fig, ax = get_figs(1)
-    
-    # Prepare the color list to match the order of dataframe columns
+
     color_list = None
     if colors is not None:
-        # Map the dictionary colors to the specific order of columns in 'proportions'
-        # Uses black '#000000' as fallback if a column name is missing from the dict
         color_list = [colors[i] for i,col in enumerate(proportions.columns)]
-    
-    # Pass the aligned color_list to the plot function
-    proportions.plot(kind='bar', stacked=True, ax=ax, color=color_list,)
-    ax.set_xticklabels(ax.get_xticklabels(), rotation='horizontal', fontsize=15) 
+
+    kind = 'barh' if horizontal else 'bar'         
+    proportions.plot(kind=kind, stacked=True, ax=ax, color=color_list)
+
+    if horizontal:  
+        ax.invert_yaxis()  
+        ax.set_yticklabels(ax.get_yticklabels(), rotation='horizontal', fontsize=15)
+    else:
+        ax.set_xticklabels(ax.get_xticklabels(), rotation='horizontal', fontsize=15)
+
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=15)
     return ax
+
 
 def heatmap_proportions(proportions,ax=None,scaled=True,dendro=True,col_order=None,colors=None):
     if ax is None:
@@ -215,7 +218,7 @@ def plot_region_distribution(proportions, colors=None, ax=None,fontsize=12,forma
 def harmonize_target_colors(
     adata,
     col_ref="annotation",
-    col_target="clustering",
+    col_target="spatial_domains",
 ):
     """
     Match categories of `col_target` to those of `col_ref` by maximum overlap
@@ -292,16 +295,16 @@ def _cmap(adata, col):
     return dict(zip(cats, adata.uns.get(f"{col}_colors", plt.cm.tab20(np.linspace(0, 1, len(cats))))))
 
 
-def plot_cluster_ccc_score(adata, clustering_col, ccc_score_col, column_shown,sample_shown,ax=None,insersion=(.15,.25)):
-    s = adata.obs.groupby(clustering_col)[ccc_score_col].mean().sort_values()
+def plot_ccc_score_per_group(adata, group_col, ccc_score_col, column_shown,sample_shown,ax=None,insersion=(.15,.25)):
+    s = adata.obs.groupby(group_col)[ccc_score_col].mean().sort_values()
     order = s.index.tolist()
     # print(s)
-    cmap = _cmap(adata, clustering_col)
+    cmap = _cmap(adata, group_col)
     # cols = [cmap[c] for c in order]
     if isinstance(order[0],int):
-        cols = [adata.uns[f'{clustering_col}_colors'][c] for i,c in enumerate(order)]
+        cols = [adata.uns[f'{group_col}_colors'][c] for i,c in enumerate(order)]
     else:
-        cols = [adata.uns[f'{clustering_col}_colors'][i] for i,c in enumerate(order)]
+        cols = [adata.uns[f'{group_col}_colors'][i] for i,c in enumerate(order)]
     ax = ax or plt.subplots(figsize=(max(8, len(order)), 4))[1]
 
     ax.bar(range(len(order)), s.values, color=cols)
@@ -311,7 +314,7 @@ def plot_cluster_ccc_score(adata, clustering_col, ccc_score_col, column_shown,sa
     for tl, c in zip(ax.get_xticklabels(), cols):
         # print(c)
         tl.set_color(c)
-    ax.set(xlabel="Cluster", ylabel="CCC score (mean)")
+    ax.set(xlabel="Group", ylabel="CCC score (mean)")
     ax.grid(axis="y", ls="--", alpha=0.3)
     ylim = ax.get_ylim()
     ax.set_ylim(ylim[0],ylim[1]+0.12*ylim[1])
@@ -321,7 +324,7 @@ def plot_cluster_ccc_score(adata, clustering_col, ccc_score_col, column_shown,sa
         # ia = ax.inset_axes([x_ax - 0.04, y_ax + 0.01, 0.04, 0.15])
         ia = ax.inset_axes([x_ax - 0.04, y_ax + 0.01, insersion[0], insersion[1]])
         adatai = adata[adata.obs[column_shown]==sample_shown]
-        space_plot_mask(adatai, clustering_col, c, ax=ia, snm=.1, sm=.8)
+        space_plot_mask(adatai, group_col, c, ax=ia, snm=.1, sm=.8)
         ia.set(xticks=[], yticks=[])
         ia.set_title('')
         ia.set_xlabel('')
@@ -400,7 +403,6 @@ def plot_ct_pair_across_samples(
 def pie_region(adata, value, region_col, col='annotation', ax=None, colors=None):
     p = adata.obs.loc[adata.obs[col] == value, region_col].value_counts()
     ax = ax or get_figs(1, 5, 5)[1]
-    print(p)
     ax.pie(p.values, labels=[f'{k}\n{v:,}' for k, v in p.items()], autopct='%1.0f%%',
            colors=colors or adata.uns.get(f'{region_col}_colors'), startangle=90)
     ax.set_title(f'{value}  (n={p.sum():,})', fontsize=13)

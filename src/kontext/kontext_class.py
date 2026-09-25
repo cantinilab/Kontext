@@ -3,10 +3,12 @@
 # import json
 import scipy.sparse as sps 
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from kontext.clustering import gmm_clustering, kmeans_clustering
-from kontext.utils import format_key,format_value,spatial_kernel,expression_kernel_at_indices, add_diagonal, memory_of, neighborhood_product, pca_of_mat, cross_weights, compute_niche_context, lr_code_of, get_LR_matrices,accumulate_lr_stats,compute_LR_score
-
+from kontext.utils import format_key,format_value,spatial_kernel,expression_kernel_at_indices, add_diagonal, memory_of, neighborhood_product, pca_of_mat, cross_weights, compute_niche_context, get_LR_matrices,accumulate_lr_stats,compute_LR_score
+from kontext.utils import lr_normalize,lr_moments,lr_availability,lr_moments,lr_score,lr_aggregate,lr_cell_score,lr_log
+from kontext.utils import to_dense,zscore
 
 
 
@@ -30,9 +32,9 @@ def signature(params):
 
 class Kontext:
 
-    _ARTIFACTS = ("weights", "E_pca", "C_pca", "E_umap", "C_umap", "clustering", "scores",'LR_scores')
+    _ARTIFACTS = ("weights", "E_pca", "C_pca", "E_umap", "C_umap", "spatial_domains", "scores",'LR_scores')
 
-    def __init__(self, sigma_e=1, snn=20, alpha=1, n_comps=50,
+    def __init__(self, sigma_e=1, snn=20, alpha=1/2, n_comps=50,
                 save=None, load=None, verbose=False,chunk=50_000):
 
         self.sigma_e = sigma_e
@@ -62,7 +64,7 @@ class Kontext:
         self.params_E = {**self.params_C, "alpha": alpha}
         self.sig_C = signature(self.params_C)
         self.sig_E = signature(self.params_E)
-        self.clust_sig = None
+        self.spatial_domains_sig = None
 
 
 
@@ -74,31 +76,42 @@ class Kontext:
         self.maybe_save(adata, "E_pca")
         return adata
 
-    def cluster(self, adata, n_clusters="ground_truth",
+    def spatial_domains(self, adata, n_domains="ground_truth",
                 clustering="gmm", seed=0):
         
-        self.init_clustering(adata, n_clusters, clustering, seed)
-        if not self.maybe_load(adata, "clustering"):
+        self.init_spatial_domains(adata, n_domains, clustering, seed)
+        if not self.maybe_load(adata, "spatial_domains"):
             if "E_pca" not in adata.obsm:
                 if not self.maybe_load(adata, "E_pca"):
-                    self.fit(adata)
-            self.compute_clustering(adata)
+                    # self.fit(adata)
+                    self.weights(adata)
+                    self.spatial_domains_embedding(adata,add_layer=True)
+                    pca_of_mat(adata,adata.layers['E'],n_comps=self.n_comps,key='E')
+            self.compute_spatial_domains(adata)
         return adata
 
     def weights(self, adata):
         self.ensure_weights(adata)
-        return adata
+        # return adata
 
-    def niche_context(self, adata, matrix="E", cell_type_key="global_cell_type",mask_column=None,exocrine=True,verbose=None):
+    def niche(self, adata, cell_type_key="global_cell_type",mask_column=None,exocrine=True,verbose=False,weights_key='wc'):
         verbose = self.verbose if verbose is None else verbose
         self.ensure_weights(adata)
     
-        w = adata.obsm["w" if matrix == "E" else "wc"]
+        w = adata.obsm[weights_key]
         if exocrine:
             if mask_column is None:
                 mask_column = cell_type_key
             w = cross_weights(w, adata.obs[mask_column])
         compute_niche_context(adata, w, cell_type_key=cell_type_key,verbose=verbose)
+
+
+    def local_alignment(self,adata, layer_C="C"):
+        """Per-cell context correlation (Pearson):.cosine similarity in PCA space."""
+        Xz, Cz = zscore(to_dense(adata.X)), zscore(to_dense(adata.layers[layer_C]))
+        num = (Xz * Cz).sum(1)
+        den = np.sqrt((Xz**2).sum(1) * (Cz**2).sum(1)) + 1e-10
+        adata.obs["local_alignment"] = np.asarray((num / den).astype(np.float32)).ravel()
 
 # ---- computation (private) ----
 
@@ -125,7 +138,10 @@ class Kontext:
                 wc = wc_i if wc is None else wc + wc_i
             adata.obsm["ws"] = ws
             adata.obsm["wc"] = wc
-            adata.obsm["w"] = add_diagonal(wc, self.alpha)
+            if self.alpha == 1:
+                adata.obsm['w'] = sps.identity(len(adata)).tocsr()
+            else:
+                adata.obsm["w"] = add_diagonal(wc, self.alpha/(1-self.alpha))
             if self.verbose:
                 print('memory of w : ',memory_of(adata.obsm['w']))
             self.maybe_save(adata, "weights")
@@ -143,11 +159,29 @@ class Kontext:
         if self.snn is not None and self.sigma_e is not None:
             w = ws.multiply(we)
         adata.obsm["wc"] = w
-        adata.obsm["w"] = add_diagonal(w, self.alpha)
+        if self.alpha == 1:
+            adata.obsm['w'] = sps.identity(len(adata)).tocsr()
+        else:
+            adata.obsm["w"] = add_diagonal(w, self.alpha/(1-self.alpha))
+
         if self.verbose:
             print('memory of w : ',memory_of(adata.obsm['w']))
         self.maybe_save(adata, "weights")
 
+
+    def microenvironment_embedding(self,adata,add_layer=True):
+        C = neighborhood_product(adata.X, adata.obsm['wc'])
+        if sps.issparse(adata.X):
+            C = sps.csr_matrix(C)
+        if add_layer:
+            adata.layers['C'] = C
+
+    def spatial_domains_embedding(self,adata,add_layer=True):
+        E = neighborhood_product(adata.X, adata.obsm['w'])
+        if sps.issparse(adata.X):
+            E = sps.csr_matrix(E)
+        if add_layer:
+            adata.layers['E'] = E
 
 
     def smooth_and_pca(self, adata, weight_key, name,add_layer=False,pca=True):
@@ -158,6 +192,7 @@ class Kontext:
             adata.layers[name] = result
         if self.verbose:
             print(f'memory of layer {name} : ',memory_of(result),result.shape)
+
         if pca:
             pca_of_mat(adata, result, n_comps=self.n_comps, key=name)
         if self.verbose:
@@ -165,81 +200,44 @@ class Kontext:
             
 
 
-    def compute_clustering(self, adata, matrix_key="E_pca"):
-        fn = CLUSTERERS[self.clust_params["clustering"]]
-        params = {k: v for k, v in self.clust_params.items() if k != "clustering"}
+    def compute_spatial_domains(self, adata, matrix_key="E_pca"):
+        fn = CLUSTERERS[self.spatial_domains_params["clustering"]]
+        params = {k: v for k, v in self.spatial_domains_params.items() if k != "clustering"}
         labels = fn(matrix=adata.obsm[matrix_key], **params)
 
-        adata.obs["clustering"] = pd.Categorical(labels)
+        adata.obs["spatial_domains"] = pd.Categorical(labels)
         adata.obs[self.spatial_domains_signature] = pd.Categorical(labels)
-        self.maybe_save(adata, "clustering")
+        self.maybe_save(adata, "spatial_domains")
 
 
 
-    def init_clustering(self, adata, n_clusters='ground_truth', clustering='gmm', seed=0):
-        if n_clusters == "ground_truth" and "n_clusters" in adata.uns.get("data", {}):
-            n_clusters = adata.uns["data"]["n_clusters"]
-        self.clust_params = dict(clustering=clustering, seed=seed,
-                                 n_clusters=n_clusters)
-        self.clust_sig = signature(self.clust_params)
-        self.spatial_domains_signature = f'{self.sig_E}_{self.clust_sig}'
+    def init_spatial_domains(self, adata, n_domains='ground_truth', clustering='gmm', seed=0):
+        if n_domains == "ground_truth" and "n_domains" in adata.uns.get("data", {}):
+            n_domains = adata.uns["data"]["n_domains"]
+        self.spatial_domains_params = dict(clustering=clustering, seed=seed,
+                                 n_domains=n_domains)
+        self.spatial_domains_sig = signature(self.spatial_domains_params)
+        self.spatial_domains_signature = f'{self.sig_E}_{self.spatial_domains_sig}'
         adata.uns['signature'] = self.spatial_domains_signature
 
 
-    # def scores(self,adata,ground_truth='annotation',clustering='clustering',spatial='spatial'):
-            
-    #         # adata,failed=False,truth_col='annotation',clustering_col='clustering',embedding_key='X_pca',spatial_key='spatial',purity=False):
-    #     """
-    #     Computes the ARI and NMI scores of a clustering by comparing the columns `truth_col` and `clustering_col` in adata.obs.
-    #     If the clustering has failed, the scores will be None
-    #     """
-    #     if not self.maybe_load(adata,'scores'):
-    #         out = {}
-    #         out['ARI'] = adjusted_rand_score(adata.obs[ground_truth],adata.obs[clustering])
-    #         out['NMI'] = normalized_mutual_info_score(adata.obs[ground_truth],adata.obs[clustering])
-    #         out['CHAOS'] = compute_CHAOS(adata.obs[clustering],adata.obsm[spatial])
-    #         out['PAS'] = compute_PAS(adata.obs[clustering],adata.obsm[spatial])
-    #         out['HOM'] = homogeneity_score(adata.obs[ground_truth],adata.obs[clustering])
-    #         out['COM'] = completeness_score(adata.obs[ground_truth],adata.obs[clustering])
-            
-    #         if self.verbose:
-    #             print(out)
-    #         if 'kontext' not in adata.uns:
-    #             adata.uns['kontext'] = {}
-
-    #         signature = f"{self.sig_E}_{self.clust_sig}"
-    #         out['signature'] = signature
-    #         adata.uns['kontext']['signature'] = signature
-    #         adata.uns['kontext'][signature] = {
-    #                                         'data': adata.uns['data'],
-    #                                         'params_E':self.params_E,
-    #                                         'clust_params':self.clust_params,
-    #                                         'paths': {k: str(self.path(adata, k)) for k in self._ARTIFACTS if k != 'LR_scores'},
-    #                                         'scores':out,
-    #                                         }
-
-    #         self.maybe_save(adata, "scores")
-    
-
-
-
-    def clustering_of_merged_adata(self,adata,n_clusters, clustering, seed):
-
+    def spatial_domains_of_merged_adata(self,adata,n_domains, clustering, seed):
         print('pca of merged adata')
         if 'C_pca' in adata.obsm:
             adata.obsm.pop('C_pca')
         if 'E_pca' in adata.obsm:
             adata.obsm.pop('E_pca')
+
         pca_of_mat(adata,adata.layers['E'],n_comps=self.n_comps,key='E')
         pca_of_mat(adata,adata.layers['C'],n_comps=self.n_comps,key='C')
 
         
-        print('clustering of merged adata')
-        self.init_clustering(adata,n_clusters=n_clusters, clustering=clustering, seed=seed)
-        loaded = self.load_clustering(adata)
+        print('spatial domains of merged adata')
+        self.init_spatial_domains(adata,n_domains=n_domains, clustering=clustering, seed=seed)
+        loaded = self.load_spatial_domains(adata)
         if not loaded:
-            print('not loaded, computing clustering')
-            self.compute_clustering(adata,matrix_key='E_pca')
+            print('not loaded, computing spatial domains')
+            self.compute_spatial_domains(adata,matrix_key='E_pca')
 
 
 
@@ -271,7 +269,10 @@ class Kontext:
         if not p.exists():
             return False
         adata.obsm["wc"] = sps.load_npz(p)
-        adata.obsm["w"] = add_diagonal(adata.obsm["wc"], self.alpha)
+        if self.alpha == 1:
+            adata.obsm['w'] = sps.identity(len(adata)).tocsr()
+        else:
+            adata.obsm["w"] = add_diagonal(adata.obsm["wc"], self.alpha/(1-self.alpha))
         return True
 
     def save_pca(self, adata, key):
@@ -284,17 +285,17 @@ class Kontext:
         adata.obsm[key] = pd.read_csv(p, index_col=0).to_numpy()
         return True
 
-    def save_clustering(self, adata):
-        adata.obs["clustering"].to_csv(self.path(adata, "clustering"))
+    def save_spatial_domains(self, adata):
+        adata.obs["spatial_domains"].to_csv(self.path(adata, "spatial_domains"))
 
-    def load_clustering(self, adata,signed=False):
-        p = self.path(adata, "clustering")
+    def load_spatial_domains(self, adata,signed=False):
+        p = self.path(adata, "spatial_domains")
         try:
             df = pd.read_csv(p, index_col=0)
             if len(df) != len(adata):
-                log.warning("Cached clustering size mismatch")
+                log.warning("Cached spatial_domains size mismatch")
                 return False
-            adata.obs["clustering"] = pd.Categorical(df.iloc[:, 0])
+            adata.obs["spatial_domains"] = pd.Categorical(df.iloc[:, 0])
             if signed:
                 signature =str(p).split('/')[-1].replace('.csv','')
                 adata.obs[signature] = pd.Categorical(df.iloc[:, 0])
@@ -322,11 +323,11 @@ class Kontext:
             if 'kontext' not in adata.uns:
                 adata.uns['kontext'] = {}
             # print(data)
-            signature = f"{self.sig_E}_{self.clust_sig}"
+            signature = f"{self.sig_E}_{self.spatial_domains_sig}"
             adata.uns['kontext']['signature'] = signature
             adata.uns['kontext'][signature] = {
                 'params_E': data['params_E'],
-                'clust_params': data['clust_params'],
+                'spatial_domains_params': data['spatial_domains_params'],
                 'scores': data['scores']
             }
             return data
@@ -349,7 +350,7 @@ class Kontext:
                         "load": lambda s, a: s.load_pca(a, "E_umap")},
         "C_umap":      {"save": lambda s, a: s.save_pca(a, "C_umap"),
                         "load": lambda s, a: s.load_pca(a, "C_umap")},
-        "clustering": {"save": save_clustering, "load": load_clustering},
+        "spatial_domains": {"save": save_spatial_domains, "load": load_spatial_domains},
         "scores": {"save": save_scores, "load": load_scores},
     }
 
@@ -368,9 +369,9 @@ class Kontext:
             "C_pca":      (base / "pca_C",      f"{self.sig_C}.csv"),
             "E_umap":      (base / "umap_E",      f"{self.sig_E}.csv"),
             "C_umap":      (base / "umap_C",      f"{self.sig_C}.csv"),
-            "clustering": (base / "clustering",
-                        f"{self.sig_E}_{self.clust_sig}.csv"),
-            "scores":     (base / "scores",     f"{self.sig_E}_{self.clust_sig}.json"),
+            "spatial_domains": (base / "spatial_domains",
+                        f"{self.sig_E}_{self.spatial_domains_sig}.csv"),
+            "scores":     (base / "scores",     f"{self.sig_E}_{self.spatial_domains_sig}.json"),
         }
         folder, fname = mapping[kind]
         folder.mkdir(parents=True, exist_ok=True)
@@ -398,77 +399,41 @@ class Kontext:
 
 
 
+    def cell_cell_communication(self,adata,pairs,mode='mean'):
+        lr_normalize(adata, pairs)
+        lr_availability(adata, None)
+        lr_moments(adata, 'X_lr')
+        lr_moments(adata, 'A_all')
+        lr_moments(adata, 'P_all')
+        lr_cell_score(adata, 'all', mode=mode, col='cell_communication')  
 
 
-    def LR_scores(self, adata, communication_type="exocrine",groups="cell_type", w_key="wc", groups_of_interest=None):
-            """
-            Compute per-cell ligand-receptor score matrices (stored in adata.obsm)
-            and their obs-/pair-level summaries.
-
-            Each score matrix S is cached individually: if loading is enabled the
-            matrix is read from disk instead of recomputed, which also avoids
-            building the underlying LR context matrices.
-            """
-
-            
-
-            pairs = adata.uns["context_LR"]["pairs"]
-            code  = lr_code_of(communication_type, groups)
-
-            groups_list = (adata.obs[groups].unique() if groups_of_interest is None else groups_of_interest)
-            cell_type_masks = {ct: (adata.obs[groups] == ct).values for ct in groups_list}
-
-            # one score matrix for single-context types, one per group otherwise
-            if communication_type in ("all", "exocrine", "endocrine"):
-                score_specs = [(f"LR_R_{code}", code, f"zC_lr_{code}")]
-            else:
-                score_specs = [(f"LR_R_{code}_c{t}", f"{code}_c{t}", f"zC_lr_{code}_c{t}")
-                            for t in groups_list]
-
-            obs_stats,  obs_names  = [], []
-            pair_stats, pair_names = [], []
-
-            get_LR_matrices(adata, communication_type, groups, w_key,groups_of_interest=groups_of_interest)
-            for score_key, stat_code, context_key in score_specs:
-                S = self.maybe_load_lr_score(adata, score_key)
-                if S is None:
-                    S = compute_LR_score(adata,context_key,score_key)
-                    self.maybe_save_lr_score(adata, score_key, S)
-                accumulate_lr_stats(S, score_key, stat_code, cell_type_masks,
-                                        obs_stats, obs_names, pair_stats, pair_names)
-                
-                if self.verbose:
-                    print(f"size of {score_key}: {memory_of(S)}")
-
-            df_obs   = pd.DataFrame(obs_stats,  index=obs_names,  columns=adata.obs_names).T
-            df_pairs = pd.DataFrame(pair_stats, index=pair_names, columns=pairs.index).T
-            adata.obs = adata.obs.merge(df_obs, right_index=True, left_index=True)
-            adata.uns["context_LR"]["pairs"] = pd.concat([pairs, df_pairs], axis=1)
-            return code
-
-    # ---- LR stats helpers ----
+    def init_sender_receiver_communication(self,adata,pairs,sender,receiver,groups):
+        lr_normalize(adata, pairs)
+        lr_availability(adata, receiver, groups)
+        lr_availability(adata, sender, groups)
+        r = {'col':groups,'value':receiver}
+        lr_moments(adata, 'X_lr',r=r)
+        
+        lr_moments(adata, f'A_{sender}', om=(adata.obs[f'm_{sender}'] > 0).values,r=r)
+        lr_moments(adata, f'P_{sender}', om=(adata.obs[f'm_{sender}'] > 0).values,r=r)
 
 
-    # ---- LR score I/O ----
-
-    def _lr_score_path(self, adata, score_key):
-        folder = self.base(adata) / "LR_scores"
-        folder.mkdir(parents=True, exist_ok=True)
-        return folder / f"{score_key}.npy"
-
-    def maybe_save_lr_score(self, adata, score_key, S):
-        if self.save.get("LR_scores", False):
-            np.save(self._lr_score_path(adata, score_key), S)
-
-    def maybe_load_lr_score(self, adata, score_key):
-        if not self.load.get("LR_scores", False):
-            return None
-        p = self._lr_score_path(adata, score_key)
-        if not p.exists():
-            return None
-        try:
-            return np.load(p)
-        except Exception as e:
-            if self.verbose:
-                print(f"LR score not loaded {e} {p}")
-            return None
+    def sender_receiver_scores(self,adata,pairs,sender,receiver,groups,mode='mean',receiver_threshold=0.1,group_by='spatial_domains',by_order=None,
+                            genes_of_interest=None,log = True):
+        import numpy as np
+        r = {'col': groups, 'value': receiver}
+        S = lr_score(adata, sender, receiver, groups, mode, r=r,src='P')
+        gi = pd.Index(adata.uns['lr']['genes'])
+        pos = adata.obs_names.get_indexer(S.index)
+        det = pd.Series(np.asarray((adata.obsm['X_lr'][pos][:, gi.get_indexer(pairs.receptor)] > 0).mean(0)).ravel(), index=pairs.index)
+        keep = det[det > receiver_threshold].index
+        T = lr_aggregate(adata, S, sender, by=group_by)['all']
+        if by_order is not None:
+            T = T.reindex(by_order)
+        if genes_of_interest is None:
+            genes_of_interest = pairs.index.tolist()
+        T = T[[g for g in genes_of_interest if g in keep and g in S.columns]]
+        if log:
+            T = lr_log(T)
+        return(T)
