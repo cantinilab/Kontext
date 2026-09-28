@@ -187,7 +187,7 @@ def plot_region_distribution(proportions, colors=None, ax=None,fontsize=12,forma
                 text = f'{ci:{format_value}}' if wi < 0.10 else f'{ci:{format_value}}'
                 ax.text(left[j] + wi/2, y[j], text,
                         ha='center', va='center', fontsize=fontsize,
-                        color='black',
+                        color='black' if reg in [0,'boundary','TME'] else 'white',
                         # path_effects=[pe.withStroke(linewidth=1.2, foreground='black')]
                         )
         left += w
