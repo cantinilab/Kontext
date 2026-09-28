@@ -877,8 +877,10 @@ def compute_niche_context(adata,w,cell_type_key = "cell_type",verbose=False):
         cell_type_key=cell_type_key,
         categories=list(categories),
     )
+
     niche_cols = {f'{key_added}_{cat}': niche[:, i].toarray().ravel() for i, cat in enumerate(categories)}
-    adata.obs = pd.concat([adata.obs, pd.DataFrame(niche_cols, index=adata.obs.index)], axis=1)
+    for col, vals in niche_cols.items():
+        adata.obs[col] = vals
     return adata 
 
 
