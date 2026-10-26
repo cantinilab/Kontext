@@ -404,8 +404,9 @@ class Kontext:
         lr_availability(adata, None)
         lr_moments(adata, 'X_lr')
         lr_moments(adata, 'A_all')
-        lr_moments(adata, 'P_all')
-        lr_cell_score(adata, 'all', mode=mode, col='cell_communication')  
+        lr_cell_score(adata, 'all', mode=mode, col='communication_score')  
+
+
 
 
     def init_sender_receiver_communication(self,adata,pairs,sender,receiver,groups):

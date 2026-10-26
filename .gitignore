@@ -34,7 +34,7 @@ coverage.xml
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
+
 
 # Data (never commit large datasets)
 data/
