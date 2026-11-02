@@ -174,7 +174,7 @@ def plot_region_distribution(proportions, colors=None, ax=None,fontsize=12,forma
     totals = proportions.sum(axis=1)
     normed = proportions.div(totals, axis=0)
     regions = list(normed.columns)
-    palette = colors or plt.cm.Set2(np.linspace(0, 1, len(regions)))
+    palette = colors or plt.get_cmap.Set2(np.linspace(0, 1, len(regions)))
     y = np.arange(len(normed))
     left = np.zeros(len(normed))
     
@@ -292,7 +292,7 @@ def harmonize_target_colors(
 def _cmap(adata, col):
     vc = adata.obs[col]
     cats = vc.cat.categories if pd.api.types.is_categorical_dtype(vc) else vc.unique()
-    return dict(zip(cats, adata.uns.get(f"{col}_colors", plt.cm.tab20(np.linspace(0, 1, len(cats))))))
+    return dict(zip(cats, adata.uns.get(f"{col}_colors", plt.get_cmap.tab20(np.linspace(0, 1, len(cats))))))
 
 
 def plot_ccc_score_per_group(adata, group_col, ccc_score_col, column_shown,sample_shown,ax=None,insersion=(.15,.25)):
